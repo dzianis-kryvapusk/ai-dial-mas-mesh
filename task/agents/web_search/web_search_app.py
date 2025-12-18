@@ -14,14 +14,56 @@ from task.utils.constants import DIAL_ENDPOINT, DEPLOYMENT_NAME
 
 _DDG_MCP_URL = os.getenv('DDG_MCP_URL', "http://localhost:8051/mcp")
 
-#TODO:
-# 1. Create WebSearchApplication class and extend ChatCompletion
-# 2. As a tools for WebSearchAgent you need to provide:
-#   - MCP tools by _DDG_MCP_URL
-#   - CalculationsAgentTool (MAS Mesh)
-#   - ContentManagementAgentTool (MAS Mesh)
-# 3. Override the chat_completion method of ChatCompletion, create Choice and call WebSearchAgent
-# ---
-# 4. Create DIALApp with deployment_name `web-search-agent` (the same as in the core config) and impl is instance
-#    of the WebSearchApplication
-# 5. Add starter with DIALApp, port is 5003 (see core config)
+
+class WebSearchApplication(ChatCompletion):
+
+    def __init__(self):
+        self.tools: list[BaseTool] = []
+
+    async def chat_completion(self, request: Request, response: Response) -> None:
+        if not self.tools:
+            self.tools = await self._create_tools()
+
+        with response.create_single_choice() as choice:
+            await WebSearchAgent(
+                endpoint=DIAL_ENDPOINT,
+                tools=self.tools
+            ).handle_request(
+                choice=choice,
+                deployment_name=DEPLOYMENT_NAME,
+                request=request,
+                response=response,
+            )
+
+    @staticmethod
+    async def _get_mcp_tools(url: str) -> list[BaseTool]:
+        try:
+            tools: list[BaseTool] = []
+            mcp_client = await MCPClient.create(url)
+            for mcp_tool_model in await mcp_client.get_tools():
+                tools.append(
+                    MCPTool(
+                        client=mcp_client,
+                        mcp_tool_model=mcp_tool_model,
+                    )
+                )
+            return tools
+        except Exception as e:
+            print(f"Error: MCP tool loading failed: {e}")
+            raise e
+
+    async def _create_tools(self) -> list[BaseTool]:
+        tools: list[BaseTool] = [
+            CalculationsAgentTool(DIAL_ENDPOINT),
+            ContentManagementAgentTool(DIAL_ENDPOINT),
+        ]
+        tools.extend(await self._get_mcp_tools(_DDG_MCP_URL))
+        return tools
+
+
+app: DIALApp = DIALApp()
+agent_app = WebSearchApplication()
+app.add_chat_completion(deployment_name="web-search-agent", impl=agent_app)
+
+if __name__ == "__main__":
+    uvicorn.run(app, port=5003, host="0.0.0.0")
